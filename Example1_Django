@@ -1,0 +1,2218 @@
+import json
+import hashlib
+
+from django.shortcuts import render, get_object_or_404
+from django.contrib.auth.decorators import login_required
+from django.core.exceptions import ObjectDoesNotExist
+from django.http import HttpResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.utils import timezone
+from django.db.models import Q
+
+from rest_framework.renderers import JSONRenderer
+from rest_framework.parsers import JSONParser
+from rest_framework import views
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.decorators import api_view, authentication_classes
+from rest_framework.decorators import permission_classes
+from rest_framework.authentication import SessionAuthentication
+from rest_framework.authentication import BasicAuthentication
+from rest_framework.permissions import IsAuthenticated
+
+from users.models import User, Team, Group, TeamUser, UserGroup
+from .models import Task, TaskTeam, TaskUser, ToDo, Comment, Category
+from .models import TaskLog
+
+from .serializers import CategorySerializer, TaskSerializer, TaskTeamSerializer
+from .serializers import TaskUserSerializer, CommentSerializer, ToDoSerializer
+from .serializers import TaskLogSerializer, TaskShowSerializer
+from .serializers import MainTaskListSerializer, AddTaskSerializer
+from .serializers import AddToDoSerializer, AddCommentSerializer, ToDoSerializer
+from .serializers import MainCategorySerializer, AddCategorySerializer
+
+# TASK CONTAINER (FRONT)
+@login_required
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def tasks_boards(request):
+    context = {}
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+    context['user'] = user
+    return render(request, 'tasks/tasks_app_container.html', context)
+
+# USERS CONTAINER (FRONT)
+@login_required
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def user_boards(request):
+    context = {}
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+    context['user'] = user
+    return render(request, 'tasks/users_app_container.html', context)
+
+# ADD NEW TASK (V1.0 07/10/17)
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def add_task(request, format=None):
+    """
+    Creación de una Nueva Tarea.
+    """
+    # LOGGED USER'S INSTANCE
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    # DATA SENT BY FRONT-END
+    json_data = request.data
+
+    print(json_data)
+
+    new_task = {
+        "organization": user.organization.pk,
+        "title": json_data['title'],
+        "description": json_data['description'],
+        "category": json_data['category'],
+        "creator": user.pk,
+        "limit_date": json_data['limit_date'],
+        "status": 'N',
+        "father_task": None
+    }
+
+    print(new_task)
+
+    task_serializer = AddTaskSerializer(data=new_task)
+    print(task_serializer)
+    if task_serializer.is_valid():
+        print('es valido (NUEVA TAREA)')
+        task_serializer.save()
+        last_task = Task.objects.all().last()
+        manager_list = json_data['in_charge_users']
+        managers_pk = []
+
+        for pk in manager_list:
+            print(pk['pk'])
+            managers_pk.append(pk['pk'])
+
+        new_managers_pk = sorted(managers_pk)
+        hash_array = []
+        hash_array.append(user.organization.pk)
+
+        for manager in new_managers_pk:
+            print(manager)
+            hash_array.append(manager)
+
+        hashId = hashlib.sha512()
+        hashId.update(repr(list(hash_array)).encode('utf-8'))
+
+        print(hash_array)
+        print(hashId.hexdigest())
+
+        try:
+            team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+            print('ya existe el equipo')
+            taskteam = TaskTeam.objects.create(
+                team=team_already_exist,
+                task=last_task,
+                role='M')
+        except Team.DoesNotExist:
+            print('no existe el equipo')
+            new_team = Team.objects.create(
+                organization=user.organization,
+                hash_team=hashId.hexdigest())
+            taskteam = TaskTeam.objects.create(
+                team=new_team,
+                task=last_task,
+                role='M')
+
+            for manager in new_managers_pk:
+                member = User.objects.get(pk=manager)
+                teamuser = TeamUser.objects.create(
+                    team=new_team,
+                    user=member)
+
+        for manager in new_managers_pk:
+            print(manager)
+            new_member = User.objects.get(pk=manager)
+            if new_member.pk == last_task.creator.pk:
+                taskuser = TaskUser.objects.create(
+                    task=last_task,
+                    user=new_member,
+                    status='P',
+                    notification=None)
+            else:
+                taskuser = TaskUser.objects.create(
+                    task=last_task,
+                    user=new_member,
+                    status='I',
+                    notification=None)
+
+            Comment.objects.create(
+                comment='Se añadió a ' + new_member.short_name + ' como nuevo encargado de la tarea ' + last_task.title,
+                father_comment=None,
+                task=last_task,
+                user=user)
+
+            TaskLog.objects.create(
+                task=last_task,
+                user=user,
+                log_type='Add',
+                log_detail='New manager task ' + last_task.title + ' user ' + new_member.short_name)
+
+        if json_data['assigned_users']:
+            assigned_list = json_data['assigned_users']
+            assigned_pk = []
+
+            for pk in assigned_list:
+                print(pk['pk'])
+                assigned_pk.append(pk['pk'])
+
+            new_assigned_pk = sorted(assigned_pk)
+            hash_array = []
+            hash_array.append(user.organization.pk)
+
+            for assigned in new_assigned_pk:
+                print(assigned)
+                hash_array.append(assigned)
+
+            hashId = hashlib.sha512()
+            hashId.update(repr(list(hash_array)).encode('utf-8'))
+
+            print(hash_array)
+            print(hashId.hexdigest())
+
+            try:
+                team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+                print('ya existe el equipo')
+                taskteam = TaskTeam.objects.create(
+                    team=team_already_exist,
+                    task=last_task,
+                    role='A')
+            except Team.DoesNotExist:
+                print('no existe el equipo')
+                new_team = Team.objects.create(
+                    organization=user.organization,
+                    hash_team=hashId.hexdigest())
+                taskteam = TaskTeam.objects.create(
+                    team=new_team,
+                    task=last_task,
+                    role='A')
+
+                for assigned in new_assigned_pk:
+                    member = User.objects.get(pk=assigned)
+                    teamuser = TeamUser.objects.create(
+                        team=new_team,
+                        user=member)
+
+            for assigned in new_assigned_pk:
+                print(assigned)
+                new_member = User.objects.get(pk=assigned)
+                taskuser = TaskUser.objects.create(
+                    task=last_task,
+                    user=new_member,
+                    status='I',
+                    notification=None)
+
+                Comment.objects.create(
+                    comment='Se añadió a ' + new_member.short_name + ' como nuevo asignado de la tarea ' + last_task.title,
+                    father_comment=None,
+                    task=last_task,
+                    user=user)
+
+                TaskLog.objects.create(
+                    task=last_task,
+                    user=user,
+                    log_type='Add',
+                    log_detail='New assigned task ' + last_task.title + ' user ' + new_member.short_name)
+
+        if json_data['subtasks']:
+            i = 0
+            for subtask in json_data['subtasks']:
+                print('subtarea ', subtask)
+                new_subtask = {
+                    "organization": user.organization.pk,
+                    "title": json_data['subtasks'][i]['title'],
+                    "description": json_data['subtasks'][i]['description'],
+                    "category": json_data['subtasks'][i]['category'],
+                    "creator": user.pk,
+                    "limit_date": None,
+                    "status": 'N',
+                    "father_task": last_task.pk
+                }
+
+                subtask_serializer = AddTaskSerializer(data=new_subtask)
+                print(subtask_serializer)
+                if subtask_serializer.is_valid():
+                    print('es valido (NUEVA SUBTAREA)')
+                    subtask_serializer.save()
+                    last_subtask = Task.objects.all().last()
+                    hash_array = []
+                    hash_array.append(user.organization.pk)
+                    hash_array.append(user.pk)
+                    hashId = hashlib.sha512()
+                    hashId.update(repr(list(hash_array)).encode('utf-8'))
+
+                    print(hash_array)
+                    print(hashId.hexdigest())
+
+                    try:
+                        team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+                        print('ya existe el equipo')
+                        taskteam = TaskTeam.objects.create(
+                            team=team_already_exist,
+                            task=last_subtask,
+                            role='M')
+                    except Team.DoesNotExist:
+                        print('no existe el equipo')
+                        new_team = Team.objects.create(
+                            organization=user.organization,
+                            hash_team=hashId.hexdigest())
+                        taskteam = TaskTeam.objects.create(
+                            team=new_team,
+                            task=last_subtask,
+                            role='M')
+
+                        new_member = User.objects.get(pk=user.pk)
+
+                        teamuser = TeamUser.objects.create(
+                            team=new_team,
+                            user=new_member)
+
+                    new_member = User.objects.get(pk=user.pk)
+                    taskuser = TaskUser.objects.create(
+                        task=last_subtask,
+                        user=new_member,
+                        status='P',
+                        notification=None)
+
+                    Comment.objects.create(
+                        comment='Se añadió a ' + new_member.short_name + ' como nuevo encargado de la tarea ' + last_subtask.title,
+                        father_comment=None,
+                        task=last_subtask,
+                        user=user)
+
+                    TaskLog.objects.create(
+                        task=last_subtask,
+                        user=user,
+                        log_type='Add',
+                        log_detail='New manager task ' + last_subtask.title + ' user ' + new_member.short_name)
+                else:
+                    response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                                'status': '500'
+                    }
+                    return JsonResponse(response)
+                i = i + 1
+            response = {'response': 'Tarea añadida correctamente.',
+                        'status': '200'}
+            return Response(response)
+        else:
+            print('no hay subtask')
+            response = {'response': 'Tarea añadida correctamente.',
+                        'status': '200'}
+            return Response(response)
+
+    response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                'status': '500'
+    }
+    return JsonResponse(response)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def add_managers(request, format=None):
+    """
+    Adición de Encargados a la Tarea
+    """
+    json_data = request.data
+
+    print(json_data)
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+    task = Task.objects.get(pk=json_data['task_pk'])
+    team_managers = TaskTeam.objects.get(task=task, role='M').team
+
+    try:
+        is_manager = TeamUser.objects.get(user=user, team=team_managers)
+    except TeamUser.DoesNotExist:
+        response = {'response': 'Sólo los encargados de la tarea pueden añadir.',
+                    'status': '403'}
+        return Response(response)
+
+    try:
+        current_assigned_members = TaskTeam.objects.get(task=task, role='M').team
+        print('Hay otros miembros en el equipo')
+        teamuser = TeamUser.objects.filter(team=current_assigned_members)
+        number = 0
+        i = 0
+
+        for assigned in teamuser:
+            print(assigned)
+            assigned_user = User.objects.get(pk=assigned.user.pk)
+            json_data['users'].append(assigned_user.pk)
+            print(json_data)
+            number = number + 1
+            print(number)
+
+        manager_list = list(set(json_data['users']))
+        hash_array = []
+
+        hash_array.append(user.organization.pk)
+
+        for manager in manager_list:
+            print(manager)
+            hash_array.append(manager)
+
+        hashId = hashlib.sha512()
+        hashId.update(repr(hash_array).encode('utf-8'))
+
+        print(hash_array)
+        print(hashId.hexdigest())
+
+        while i < number:
+            del json_data['users'][-1]
+            i = i + 1
+
+        print(json_data['users'])
+
+    except TaskTeam.DoesNotExist:
+        print('No hay mas miembros en el equipo')
+        assigned_list = list(set(json_data['users']))
+        hash_array = []
+
+        hash_array.append(user.organization.pk)
+
+        for manager in manager_list:
+            print(manager)
+            hash_array.append(manager)
+
+        hashId = hashlib.sha512()
+        hashId.update(repr(hash_array).encode('utf-8'))
+
+        print(hash_array)
+        print(hashId.hexdigest())
+
+    try:
+        team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+        print('ya existe el equipo')
+        taskteam = TaskTeam.objects.filter(task=task, role='M')
+        taskteam.update(team=team_already_exist)
+
+        managers = list(set(json_data['users']))
+
+        for manager in managers:
+            print(manager)
+            new_member = User.objects.get(pk=manager)
+            try:
+                current_taskuser = TaskUser.objects.get(
+                    user=new_member,
+                    task=task)
+                print('ya hay taskuser')
+                current_filter_taskuser = TaskUser.objects.filter(
+                    user=new_member,
+                    task=task)
+                current_filter_taskuser.update(status='I')
+            except TaskUser.DoesNotExist:
+                print('no hay taskuser')
+                taskuser = TaskUser.objects.create(
+                    task=task,
+                    user=new_member,
+                    status='I',
+                    notification=None)
+
+            Comment.objects.create(
+                comment='Se añadió a ' + new_member.short_name + ' como nuevo encargado de la tarea ' + task.title,
+                father_comment=None,
+                task=task,
+                user=user)
+
+            TaskLog.objects.create(
+                task=task,
+                user=user,
+                log_type='Add',
+                log_detail='New manager task ' + task.title + ' user ' + new_member.short_name)
+
+        response = {'response': 'Encargados añadidos correctamente.',
+                    'status': '200'}
+        return Response(response)
+
+    except Team.DoesNotExist:
+        print('no existe el equipo')
+        try:
+            current_taskteam = TaskTeam.objects.get(task=task, role='M')
+            taskteam = TaskTeam.objects.filter(task=task, role='M')
+            new_team = Team.objects.create(
+                organization=user.organization,
+                hash_team=hashId.hexdigest())
+            flag = True
+        except TaskTeam.DoesNotExist:
+            new_team = Team.objects.create(
+                organization=user.organization,
+                hash_team=hashId.hexdigest())
+            taskteam = TaskTeam.objects.create(
+                team=new_team,
+                task=task,
+                role='M')
+            flag = False
+
+        if flag is True:
+            current_members = TeamUser.objects.filter(team=current_taskteam.team)
+            for member in current_members:
+                print('current_member: ',member)
+                member_user = User.objects.get(pk=member.user.pk)
+                new_teamuser = TeamUser.objects.create(
+                    team=new_team,
+                    user=member_user)
+            taskteam.update(team=new_team)
+
+        managers = list(set(json_data['users']))
+
+        for manager in managers:
+            print(manager)
+            new_member = User.objects.get(pk=manager)
+            new_team_member = TeamUser.objects.create(
+                team=new_team, user=new_member)
+            try:
+                current_taskuser = TaskUser.objects.get(
+                    user=new_member,
+                    task=task)
+                print('ya hay taskuser')
+                current_filter_taskuser = TaskUser.objects.filter(
+                    user=new_member,
+                    task=task)
+                current_filter_taskuser.update(status='I')
+            except TaskUser.DoesNotExist:
+                print('no hay taskuser')
+                taskuser = TaskUser.objects.create(
+                    task=task,
+                    user=new_member,
+                    status='I',
+                    notification=None)
+
+            Comment.objects.create(
+                comment='Se añadió a ' + new_member.short_name + ' como nuevo encargado de la tarea ' + task.title,
+                father_comment=None,
+                task=task,
+                user=user)
+
+            TaskLog.objects.create(
+                task=task,
+                user=user,
+                log_type='Add',
+                log_detail='New manager task ' + task.title + ' user ' + new_member.short_name)
+
+        response = {'response': 'Encargados añadidos correctamente.',
+                    'status': '200'}
+        return Response(response)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def add_assigned(request, format=None):
+    """
+    Adición de Asignados a la Tarea
+    """
+    json_data = request.data
+
+    print(json_data)
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+    task = Task.objects.get(pk=json_data['task_pk'])
+    team_managers = TaskTeam.objects.get(task=task, role='M').team
+
+    try:
+        is_manager = TeamUser.objects.get(user=user, team=team_managers)
+    except TeamUser.DoesNotExist:
+        response = {'response': 'Sólo los encargados de la tarea pueden añadir.',
+                    'status': '403'}
+        return Response(response)
+
+    try:
+        current_assigned_members = TaskTeam.objects.get(task=task, role='A').team
+        print('Hay otros miembros en el equipo')
+        teamuser = TeamUser.objects.filter(team=current_assigned_members)
+
+        number = 0
+        i = 0
+
+        for assigned in teamuser:
+            print(assigned)
+            assigned_user = User.objects.get(pk=assigned.user.pk)
+            json_data['users'].append(assigned_user.pk)
+            print(json_data)
+            number = number + 1
+            print(number)
+
+        assigned_list = list(set(json_data['users']))
+        hash_array = []
+
+        hash_array.append(user.organization.pk)
+
+        for assigned in assigned_list:
+            print(assigned)
+            hash_array.append(assigned)
+
+        hashId = hashlib.sha512()
+        hashId.update(repr(hash_array).encode('utf-8'))
+
+        print(hash_array)
+        print(hashId.hexdigest())
+
+        while i < number:
+            del json_data['users'][-1]
+            i = i + 1
+
+        print(json_data['users'])
+
+    except TaskTeam.DoesNotExist:
+        print('No hay mas miembros en el equipo')
+        assigned_list = list(set(json_data['users']))
+        hash_array = []
+
+        hash_array.append(user.organization.pk)
+
+        for assigned in assigned_list:
+            print(assigned)
+            hash_array.append(assigned)
+
+        hashId = hashlib.sha512()
+        hashId.update(repr(hash_array).encode('utf-8'))
+
+        print(hash_array)
+        print(hashId.hexdigest())
+
+    try:
+        team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+        print('ya existe el equipo')
+
+        if TaskTeam.objects.filter(task=task, role='A').exists() is True:
+            print('ya existe taskteam')
+            taskteam = TaskTeam.objects.filter(task=task, role='A')
+            taskteam.update(team=team_already_exist)
+        else:
+            print('no existe taskteam')
+            new_taskteam = TaskTeam.objects.create(
+                team=team_already_exist,
+                task=task,
+                role='A')
+
+        managers = list(set(json_data['users']))
+
+        for manager in managers:
+            print(manager)
+            new_member = User.objects.get(pk=manager)
+            try:
+                current_taskuser = TaskUser.objects.get(
+                    user=new_member,
+                    task=task)
+                print('ya hay taskuser')
+                current_filter_taskuser = TaskUser.objects.filter(
+                    user=new_member,
+                    task=task)
+                current_filter_taskuser.update(status='I')
+            except TaskUser.DoesNotExist:
+                print('no hay taskuser')
+                taskuser = TaskUser.objects.create(
+                    task=task,
+                    user=new_member,
+                    status='I',
+                    notification=None)
+
+            Comment.objects.create(
+                comment='Se añadió a ' + new_member.short_name + ' como nuevo asignado de la tarea ' + task.title,
+                father_comment=None,
+                task=task,
+                user=user)
+
+            TaskLog.objects.create(
+                task=task,
+                user=user,
+                log_type='Add',
+                log_detail='New assigned task ' + task.title + ' user ' + new_member.short_name)
+
+        response = {'response': 'Asignados añadidos correctamente.',
+                    'status': '200'}
+        return Response(response)
+
+    except Team.DoesNotExist:
+        print('no existe el equipo')
+
+        try:
+            current_taskteam = TaskTeam.objects.get(task=task, role='A')
+            taskteam = TaskTeam.objects.filter(task=task, role='A')
+            team = Team.objects.create(
+                organization=user.organization,
+                hash_team=hashId.hexdigest())
+            flag = True
+        except TaskTeam.DoesNotExist:
+            team = Team.objects.create(
+                organization=user.organization,
+                hash_team=hashId.hexdigest())
+            taskteam = TaskTeam.objects.create(
+                team=new_team,
+                task=task,
+                role='A')
+            flag = False
+
+        if flag is True:
+            current_members = TeamUser.objects.filter(team=current_taskteam.team)
+            for member in current_members:
+                print('current_member: ',member)
+                member_user = User.objects.get(pk=member.user.pk)
+                new_teamuser = TeamUser.objects.create(
+                    team=team,
+                    user=member_user)
+            taskteam.update(team=team)
+
+        if TaskTeam.objects.filter(task=task, role='A').exists() is True:
+            print('ya existe taskteam')
+            taskteam = TaskTeam.objects.filter(task=task, role='A')
+            taskteam.update(team=team)
+        else:
+            print('no existe taskteam')
+            taskteam = TaskTeam.objects.create(
+                team=team,
+                task=task,
+                role='A')
+
+        assigned_users = list(set(json_data['users']))
+
+        for assigned_user in assigned_users:
+            print(assigned_user)
+            new_member = User.objects.get(pk=assigned_user)
+            print(new_member)
+            new_team_member = TeamUser.objects.get_or_create(
+                team=team, user=new_member)
+            try:
+                current_taskuser = TaskUser.objects.get(
+                    user=new_member,
+                    task=task)
+                print('ya hay taskuser')
+                current_filter_taskuser = TaskUser.objects.filter(
+                    user=new_member,
+                    task=task)
+                current_filter_taskuser.update(status='I')
+            except TaskUser.DoesNotExist:
+                print('no hay taskuser')
+                taskuser = TaskUser.objects.create(
+                    task=task,
+                    user=new_member,
+                    status='I',
+                    notification=None)
+
+            Comment.objects.create(
+                comment='Se añadió a ' + new_member.short_name + ' como nuevo asignado de la tarea ' + task.title,
+                father_comment=None,
+                task=task,
+                user=user)
+
+            TaskLog.objects.create(
+                task=task,
+                user=user,
+                log_type='Add',
+                log_detail='New assigned task ' + task.title + ' user ' + new_member.short_name)
+
+        response = {'response': 'Asignados añadidos correctamente.',
+                    'status': '200'}
+        return Response(response)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def delete_manager(request, format=None):
+    """
+    Eliminación de Encargados de la Tarea
+    """
+    json_data = request.data
+
+    print(json_data)
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+    task = Task.objects.get(pk=json_data['task_pk'])
+    deleted_user = User.objects.get(pk=json_data['user_pk'])
+    team_managers = TaskTeam.objects.get(task=task, role='M').team
+    userteam = TaskTeam.objects.get(task=task, role='M').team
+    remaining_teamusers = TeamUser.objects.filter(team=userteam)
+
+    if remaining_teamusers.count() == 1:
+        response = {'response': 'La tarea no puede quedar sin encargados.',
+                    'status': '403'}
+        return Response(response)
+
+    try:
+        is_manager = TeamUser.objects.get(user=user, team=team_managers)
+    except TeamUser.DoesNotExist:
+        response = {'response': 'Sólo los encargados de la tarea pueden eliminar.',
+                    'status': '403'}
+        return Response(response)
+
+    user_team = TaskTeam.objects.get(task=task, role='M').team
+    remaining_team_users = TeamUser.objects.filter(
+        team=user_team).exclude(user=deleted_user).order_by('-pk')
+    hash_array = []
+    hash_array.append(user.organization.pk)
+
+    for users in remaining_team_users:
+        print(users.user.pk)
+        hash_array.append(users.user.pk)
+
+    hashId = hashlib.sha512()
+    hashId.update(repr(list(hash_array)).encode('utf-8'))
+
+    print(repr(list(hash_array)))
+    print(hashId.hexdigest())
+
+    try:
+        team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+        print('ya existe el equipo')
+        taskteam = TaskTeam.objects.filter(task=task, role='M')
+        taskteam.update(team=team_already_exist)
+
+        task_user = TaskUser.objects.filter(user=deleted_user, task=task)
+        task_user.delete()
+
+        Comment.objects.create(
+            comment='Se eliminó a ' + deleted_user.short_name + ' como encargado de la tarea ' + task.title,
+            father_comment=None,
+            task=task,
+            user=user)
+
+        TaskLog.objects.create(
+            task=task,
+            user=user,
+            log_type='Delete',
+            log_detail='Delete manager task ' + task.title + ' user ' + deleted_user.short_name)
+
+        response = {'response': 'Encargado eliminado correctamente.',
+                    'status': '200'}
+        return Response(response)
+
+    except Team.DoesNotExist:
+        print('no existe el equipo')
+        current_taskteam = TaskTeam.objects.get(task=task, role='M')
+
+        taskteam = TaskTeam.objects.filter(task=task, role='M')
+
+        new_team = Team.objects.create(
+            organization=user.organization,
+            hash_team=hashId.hexdigest())
+
+        taskteam.update(team=new_team)
+
+        for current_member in remaining_team_users:
+            member_user = User.objects.get(pk=current_member.user.pk)
+            new_teamuser = TeamUser.objects.create(
+                team=new_team,
+                user=member_user)
+
+        task_user = TaskUser.objects.filter(user=deleted_user, task=task)
+        task_user.delete()
+
+        Comment.objects.create(
+            comment='Se eliminó a ' + deleted_user.short_name + ' como encargado de la tarea ' + task.title,
+            father_comment=None,
+            task=task,
+            user=user)
+
+        TaskLog.objects.create(
+            task=task,
+            user=user,
+            log_type='Delete',
+            log_detail='Delete manager task ' + task.title + ' user ' + deleted_user.short_name)
+
+        response = {'response': 'Encargado eliminado correctamente.',
+                    'status': '200'}
+        return Response(response)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def delete_assigned(request, format=None):
+    """
+    Eliminación de Asignados de la Tarea
+    """
+    json_data = request.data
+
+    print(json_data)
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+    task = Task.objects.get(pk=json_data['task_pk'])
+    deleted_user = User.objects.get(pk=json_data['user_pk'])
+    team_managers = TaskTeam.objects.get(task=task, role='M').team
+
+    try:
+        is_manager = TeamUser.objects.get(user=user, team=team_managers)
+    except TeamUser.DoesNotExist:
+        response = {'response': 'Sólo los encargados de la tarea pueden eliminar.',
+                    'status': '403'}
+        return Response(response)
+
+    user_team = TaskTeam.objects.get(task=task, role='A').team
+    remaining_team_users = TeamUser.objects.filter(
+        team=user_team).exclude(user=deleted_user).order_by('-pk')
+
+    hash_array = []
+    hash_array.append(user.organization.pk)
+
+    for users in remaining_team_users:
+        print(users.user.pk)
+        hash_array.append(users.user.pk)
+
+    hashId = hashlib.sha512()
+    hashId.update(repr(list(hash_array)).encode('utf-8'))
+
+    print(repr(list(hash_array)))
+    print(hashId.hexdigest())
+
+    try:
+        team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+        print('ya existe el equipo')
+        taskteam = TaskTeam.objects.filter(task=task, role='A')
+        taskteam.update(team=team_already_exist)
+
+        task_user = TaskUser.objects.filter(user=deleted_user, task=task)
+        task_user.delete()
+
+        Comment.objects.create(
+            comment='Se eliminó a ' + deleted_user.short_name + ' como asignado de la tarea ' + task.title,
+            father_comment=None,
+            task=task,
+            user=user)
+
+        TaskLog.objects.create(
+            task=task,
+            user=user,
+            log_type='Delete',
+            log_detail='Delete assigned task ' + task.title + ' user ' + deleted_user.short_name)
+
+        response = {'response': 'Asignado eliminado correctamente.',
+                    'status': '200'}
+        return Response(response)
+
+    except Team.DoesNotExist:
+        print('no existe el equipo')
+        current_taskteam = TaskTeam.objects.get(task=task, role='A')
+
+        taskteam = TaskTeam.objects.filter(task=task, role='A')
+
+        new_team = Team.objects.create(
+            organization=user.organization,
+            hash_team=hashId.hexdigest())
+
+        taskteam.update(team=new_team)
+
+        for current_member in remaining_team_users:
+            member_user = User.objects.get(pk=current_member.user.pk)
+            new_teamuser = TeamUser.objects.create(
+                team=new_team,
+                user=member_user)
+
+        task_user = TaskUser.objects.filter(user=deleted_user, task=task)
+        task_user.delete()
+
+        Comment.objects.create(
+            comment='Se eliminó a ' + deleted_user.short_name + ' como asignado de la tarea ' + task.title,
+            father_comment=None,
+            task=task,
+            user=user)
+
+        TaskLog.objects.create(
+            task=task,
+            user=user,
+            log_type='Delete',
+            log_detail='Delete assigned task ' + task.title + ' user ' + deleted_user.short_name)
+
+        response = {'response': 'Asignado eliminado correctamente.',
+                    'status': '200'}
+        return Response(response)
+
+@login_required
+@api_view(['GET','PATCH'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def edit_task(request, pk_task, format=None):
+    """
+    Edición de una Tarea Existente.
+    """
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    try:
+        tasks = Task.objects.get(pk=pk_task)
+    except Task.DoesNotExist:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+
+        serializer = AddTaskSerializer(tasks, many=False)
+        return Response(serializer.data)
+
+    if request.method == 'PATCH':
+
+        data = JSONParser().parse(request)
+        serializer = AddTaskSerializer(tasks, data=data, partial=True)
+        print(serializer)
+        if serializer.is_valid():
+            print('es valido el serializer')
+            serializer.save()
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+
+@login_required
+@api_view(['GET','DELETE'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def delete_task(request, pk_task, format=None):
+    """
+    Inhabilitación de una Tarea Existente.
+    """
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    try:
+        task = Task.objects.get(pk=pk_task)
+    except Task.DoesNotExist:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    data = {
+    "active": False
+    }
+    serializer = AddTaskSerializer(task, data=data, partial=True)
+    print(serializer)
+    if serializer.is_valid():
+        print('es valido el serializer')
+        serializer.save()
+        return Response(serializer.data, status=201)
+    return Response(serializer.errors, status=400)
+
+@login_required
+@api_view(['GET'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def task_list(request, format=None):
+    """
+    Lista de Todas las Tareas del Usuario.
+    """
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    if request.method == "GET":
+        # VER QUE TAREAS TIENE (ENCARGADO Y/O ASIGNADO)
+        inbox_tasks = Task.objects.filter(
+            Q(taskuser_task__user=user),
+            Q(taskuser_task__status='I'),
+            Q(active=True))
+
+        process_tasks = Task.objects.filter(
+            Q(taskuser_task__user=user),
+            Q(taskuser_task__status='P'),
+            Q(active=True))
+
+        if inbox_tasks.count() >= 1:
+            for inboxtask in inbox_tasks:
+                if inboxtask.father_task is None:
+                    print('Es tarea padre (inbox)')
+                else:
+                    try:
+                        fathertask = inbox_tasks.get(
+                            pk=inboxtask.father_task)
+                        print('Esta tarea y subtarea')
+                        print(fathertask.pk)
+                        inbox_tasks = inbox_tasks.exclude(
+                            father_task=fathertask.pk)
+                        print(inbox_tasks)
+                    except Task.DoesNotExist:
+                        print('No esta tarea y subtarea')
+                        pass
+
+        if process_tasks.count() >= 1:
+            for processtask in process_tasks:
+                if processtask.father_task is None:
+                    print('Es tarea padre (process)')
+                else:
+                    try:
+                        fathertask = process_tasks.get(
+                            pk=processtask.father_task)
+                        print('Esta tarea y subtarea')
+                        print(fathertask.pk)
+                        process_tasks = process_tasks.exclude(
+                            father_task=fathertask.pk)
+                        print(process_tasks)
+                    except Task.DoesNotExist:
+                        print('No esta tarea y subtarea')
+                        pass
+
+        response = {
+            'inbox_tasks': inbox_tasks,
+            'process_tasks': process_tasks
+        }
+
+        serializer = MainTaskListSerializer(response, many=False)
+        return Response(serializer.data)
+
+@login_required
+@api_view(['GET'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def category_list(request, format=None):
+    """
+    Lista de Todas las Categorias de la Organización.
+    """
+
+    c_user = request.user
+    user = get_object_or_404(User, user=c_user)
+
+    if request.method == "GET":
+        # VER QUE TAREAS TIENE (ENCARGADO Y/O ASIGNADO)
+        categories = Category.objects.filter(
+            Q(organization=user.organization),
+            Q(active=True))
+
+        response = {
+            'categories': categories
+        }
+
+        serializer = MainCategorySerializer(response, many=False)
+        return Response(serializer.data)
+
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def accept_task(request, format=None):
+    """
+    Aceptar una Tarea Asignada
+    """
+
+    json_data = request.data
+
+    print(json_data)
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    task_pk = json_data['task_pk']
+
+    try:
+        task = Task.objects.get(pk=task_pk)
+    except Task.DoesNotExist:
+        response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                    'status': '500'
+        }
+        return JsonResponse(response)
+
+    taskuser = TaskUser.objects.filter(task=task, user=user)
+    taskuser.update(status='P')
+
+    Comment.objects.create(
+        comment='Acepté la tarea ' + task.title,
+        father_comment=None,
+        task=task,
+        user=user)
+
+    TaskLog.objects.create(
+        task=task,
+        user=user,
+        log_type='Accept',
+        log_detail='Accept task ' + task.title + ' user ' + user.short_name)
+
+    response = {'response': 'Tarea aceptada correctamente.',
+                'status': '200'}
+    return Response(response)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def dismiss_task(request, format=None):
+    """
+    Salirse de una Tarea Asignada
+    """
+
+    json_data = request.data
+
+    print(json_data)
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+    task_pk = json_data['task_pk']
+
+    try:
+        task = Task.objects.get(pk=task_pk)
+    except Task.DoesNotExist:
+        response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                    'status': '500'
+        }
+        return JsonResponse(response)
+
+    taskteam = TaskTeam.objects.filter(task=task)
+
+    for team in taskteam:
+        try:
+            teamuser = TeamUser.objects.get(team=team.team, user=user)
+            print(teamuser.team)
+
+            role = TaskTeam.objects.get(team=teamuser.team, task=task)
+            print(role.role)
+
+            if role.role == 'M':
+
+                remaining_teamusers = TeamUser.objects.filter(team=teamuser.team)
+
+                if remaining_teamusers.count() == 1:
+                    response = {'response': 'La tarea no puede quedar sin encargados.',
+                                'status': '403'}
+                    return Response(response)
+                else:
+                    remaining_team_users = TeamUser.objects.filter(
+                        team=teamuser.team).exclude(user=user).order_by('pk')
+
+                    print(remaining_team_users)
+
+                    hash_array = []
+                    hash_array.append(user.organization.pk)
+
+                    for users in remaining_team_users:
+                        print(users.user.pk)
+                        hash_array.append(users.user.pk)
+
+                    hashId = hashlib.sha512()
+                    hashId.update(repr(list(hash_array)).encode('utf-8'))
+
+                    print(repr(list(hash_array)))
+                    print(hashId.hexdigest())
+
+                    try:
+                        team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+                        print('ya existe el equipo')
+                        taskteam = TaskTeam.objects.filter(task=task, role='M')
+                        taskteam.update(team=team_already_exist)
+
+                        task_user = TaskUser.objects.filter(user=user, task=task)
+                        task_user.delete()
+
+                        Comment.objects.create(
+                            comment='El usuario ' + user.short_name + ' ya no forma parte de la tarea ' + task.title + ' debido a: ' + json_data['reason'],
+                            father_comment=None,
+                            task=task,
+                            user=None)
+
+                        TaskLog.objects.create(
+                            task=task,
+                            user=None,
+                            log_type='Dismiss',
+                            log_detail='Dismiss task ' + task.title + ' user ' + user.short_name + ' reason ' + json_data['reason'])
+
+                        response = {'response': 'Tarea eliminada correctamente.',
+                                    'status': '200'}
+                        return Response(response)
+
+                    except Team.DoesNotExist:
+                        print('no existe el equipo')
+                        current_taskteam = TaskTeam.objects.get(task=task, role='M')
+                        taskteam = TaskTeam.objects.filter(task=task, role='M')
+
+                        new_team = Team.objects.create(
+                            organization=user.organization,
+                            hash_team=hashId.hexdigest())
+
+                        taskteam.update(team=new_team)
+
+                        for current_member in remaining_team_users:
+                            member_user = User.objects.get(pk=current_member.user.pk)
+                            new_teamuser = TeamUser.objects.create(
+                                team=new_team,
+                                user=member_user)
+
+                        task_user = TaskUser.objects.filter(user=user, task=task)
+                        task_user.delete()
+
+                        Comment.objects.create(
+                            comment='El usuario ' + user.short_name + ' ya no forma parte de la tarea ' + task.title + ' debido a: ' + json_data['reason'],
+                            father_comment=None,
+                            task=task,
+                            user=None)
+
+                        TaskLog.objects.create(
+                            task=task,
+                            user=None,
+                            log_type='Dismiss',
+                            log_detail='Dismiss task ' + task.title + ' user ' + user.short_name + ' reason ' + json_data['reason'])
+
+                        response = {'response': 'Tarea eliminada correctamente.',
+                                    'status': '200'}
+                        return Response(response)
+
+            if role.role == 'A':
+
+                remaining_team_users = TeamUser.objects.filter(
+                    team=teamuser.team).exclude(user=user).order_by('pk')
+
+                print(remaining_team_users)
+
+                hash_array = []
+                hash_array.append(user.organization.pk)
+
+                for users in remaining_team_users:
+                    print(users.user.pk)
+                    hash_array.append(users.user.pk)
+
+                hashId = hashlib.sha512()
+                hashId.update(repr(list(hash_array)).encode('utf-8'))
+
+                print(repr(list(hash_array)))
+                print(hashId.hexdigest())
+
+                try:
+                    team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+                    print('ya existe el equipo')
+                    taskteam = TaskTeam.objects.filter(task=task, role='A')
+                    taskteam.update(team=team_already_exist)
+
+                    task_user = TaskUser.objects.filter(user=user, task=task)
+                    task_user.delete()
+
+                    Comment.objects.create(
+                        comment='El usuario ' + user.short_name + ' ya no forma parte de la tarea ' + task.title + ' debido a: ' + json_data['reason'],
+                        father_comment=None,
+                        task=task,
+                        user=None)
+
+                    TaskLog.objects.create(
+                        task=task,
+                        user=None,
+                        log_type='Dismiss',
+                        log_detail='Dismiss task ' + task.title + ' user ' + user.short_name + ' reason ' + json_data['reason'])
+
+                    response = {'response': 'Tarea eliminada correctamente.',
+                                'status': '200'}
+                    return Response(response)
+
+                except Team.DoesNotExist:
+                    print('no existe el equipo')
+                    current_taskteam = TaskTeam.objects.get(task=task, role='A')
+
+                    taskteam = TaskTeam.objects.filter(task=task, role='A')
+
+                    new_team = Team.objects.create(
+                        organization=user.organization,
+                        hash_team=hashId.hexdigest())
+
+                    taskteam.update(team=new_team)
+
+                    for current_member in remaining_team_users:
+                        member_user = User.objects.get(pk=current_member.user.pk)
+                        new_teamuser = TeamUser.objects.create(
+                            team=new_team,
+                            user=member_user)
+
+                    task_user = TaskUser.objects.filter(user=user, task=task)
+                    task_user.delete()
+
+                    Comment.objects.create(
+                        comment='El usuario ' + user.short_name + ' ya no forma parte de la tarea ' + task.title + ' debido a: ' + json_data['reason'],
+                        father_comment=None,
+                        task=task,
+                        user=None)
+
+                    TaskLog.objects.create(
+                        task=task,
+                        user=None,
+                        log_type='Dismiss',
+                        log_detail='Dismiss task ' + task.title + ' user ' + user.short_name + ' reason ' + json_data['reason'])
+
+                    response = {'response': 'Tarea eliminada correctamente.',
+                                'status': '200'}
+                    return Response(response)
+
+
+        except TeamUser.DoesNotExist:
+            pass
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def complete_task(request, format=None):
+    """
+    Completar una Tarea Asignada
+    """
+
+    json_data = request.data
+
+    print(json_data)
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+    task_pk = json_data['task_pk']
+
+    try:
+        task = Task.objects.filter(pk=task_pk)
+        comment_task = Task.objects.get(pk=task_pk)
+    except Task.DoesNotExist:
+        response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                    'status': '500'
+        }
+        return JsonResponse(response)
+
+    team_managers = TaskTeam.objects.get(task=task, role='M').team
+
+    try:
+        is_manager = TeamUser.objects.get(user=user, team=team_managers)
+        flag = True
+    except TeamUser.DoesNotExist:
+        flag = False
+
+    if flag is True:
+
+        if comment_task.father_task is not None:
+            subtask_todos = ToDo.objects.filter(task=task)
+
+            for todo in subtask_todos:
+                if todo.done is False:
+                    print('todo no finalizado')
+                    todo_flag = True
+                else:
+                    print('todo finalizado')
+                    todo_flag = False
+
+                if todo_flag is True:
+
+                    response = {'response': 'La subtarea tiene ToDos no finalizados.',
+                                'status': '403'}
+                    return Response(response)
+
+            taskuser = TaskUser.objects.filter(task=task, user=user)
+            taskuser.update(status='C')
+
+            Comment.objects.create(
+                comment='El usuario ' + user.short_name + ' completó la subtarea ' + comment_task.title,
+                father_comment=None,
+                task=comment_task,
+                user=None)
+
+            TaskLog.objects.create(
+                task=comment_task,
+                user=None,
+                log_type='Task',
+                log_detail='Complete subtask ' + comment_task.title + ' user ' + user.short_name)
+
+            task.update(status='C')
+
+            response = {'response': 'Subtarea completada.',
+                        'status': '200'}
+            return Response(response)
+
+        else:
+            try:
+                subtasks = Task.objects.filter(father_task=comment_task.pk)
+                print('hay subtareas')
+                for subtask in subtasks:
+                    if subtask.status != 'C':
+                        subtask_flag = True
+                    else:
+                        subtask_flag = False
+
+                    if subtask_flag is True:
+
+                        response = {'response': 'La tarea tiene subtareas sin completar.',
+                                    'status': '403'}
+                        return Response(response)
+
+                task_todos = ToDo.objects.filter(task=task)
+
+                for todo in task_todos:
+                    if todo.done is False:
+                        print('todo no finalizado')
+                        todo_flag = True
+                    else:
+                        print('todo finalizado')
+                        todo_flag = False
+
+                    if todo_flag is True:
+
+                        response = {'response': 'La tarea tiene ToDos no finalizados.',
+                                    'status': '403'}
+                        return Response(response)
+
+                taskuser = TaskUser.objects.filter(task=task, user=user)
+                taskuser.update(status='C')
+
+                Comment.objects.create(
+                    comment='El usuario ' + user.short_name + ' completó la tarea ' + comment_task.title,
+                    father_comment=None,
+                    task=comment_task,
+                    user=None)
+
+                TaskLog.objects.create(
+                    task=comment_task,
+                    user=None,
+                    log_type='Task',
+                    log_detail='Complete task ' + comment_task.title + ' user ' + user.short_name)
+
+                task.update(status='C')
+
+                response = {'response': 'Tarea completada.',
+                            'status': '200'}
+                return Response(response)
+
+            except Task.DoesNotExist:
+                print('no hay subtareas')
+
+                task_todos = ToDo.objects.filter(task=task)
+
+                for todo in task_todos:
+                    if todo.done is False:
+                        print('todo no finalizado')
+                        todo_flag = True
+                    else:
+                        print('todo finalizado')
+                        todo_flag = False
+
+                    if todo_flag is True:
+
+                        response = {'response': 'La tarea tiene ToDos no finalizados.',
+                                    'status': '403'}
+                        return Response(response)
+
+                taskuser = TaskUser.objects.filter(task=task, user=user)
+                taskuser.update(status='C')
+
+                Comment.objects.create(
+                    comment='El usuario ' + user.short_name + ' completó la tarea ' + comment_task.title,
+                    father_comment=None,
+                    task=comment_task,
+                    user=None)
+
+                TaskLog.objects.create(
+                    task=comment_task,
+                    user=None,
+                    log_type='Task',
+                    log_detail='Complete task ' + comment_task.title + ' user ' + user.short_name)
+
+                task.update(status='C')
+
+                response = {'response': 'Tarea completada.',
+                            'status': '200'}
+                return Response(response)
+    if flag is False:
+
+        Comment.objects.create(
+            comment='El usuario ' + user.short_name + ' completó su labor en la tarea ' + comment_task.title,
+            father_comment=None,
+            task=comment_task,
+            user=None)
+
+        TaskLog.objects.create(
+            task=comment_task,
+            user=None,
+            log_type='Task',
+            log_detail='Complete individual task ' + comment_task.title + ' user ' + user.short_name)
+
+        taskuser = TaskUser.objects.filter(task=task, user=user)
+        taskuser.update(status='C')
+
+        response = {'response': 'Tarea completada.',
+                    'status': '200'}
+        return Response(response)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def reject_task(request, format=None):
+    """
+    Rechazar una Tarea Asignada
+    """
+
+    json_data = request.data
+
+    print(json_data)
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+    task_pk = json_data['task_pk']
+
+    try:
+        task = Task.objects.get(pk=task_pk)
+    except Task.DoesNotExist:
+        response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                    'status': '500'
+        }
+        return JsonResponse(response)
+
+    taskteam = TaskTeam.objects.filter(task=task)
+
+    for team in taskteam:
+        try:
+            teamuser = TeamUser.objects.get(team=team.team, user=user)
+            print(teamuser.team)
+
+            role = TaskTeam.objects.get(team=teamuser.team, task=task)
+            print(role.role)
+
+            if role.role == 'M':
+
+                remaining_team_users = TeamUser.objects.filter(
+                    team=teamuser.team).exclude(user=user).order_by('pk')
+
+                print(remaining_team_users)
+
+                hash_array = []
+                hash_array.append(user.organization.pk)
+
+                for users in remaining_team_users:
+                    print(users.user.pk)
+                    hash_array.append(users.user.pk)
+
+                hashId = hashlib.sha512()
+                hashId.update(repr(list(hash_array)).encode('utf-8'))
+
+                print(repr(list(hash_array)))
+                print(hashId.hexdigest())
+
+                try:
+                    team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+                    print('ya existe el equipo')
+                    taskteam = TaskTeam.objects.filter(task=task, role='M')
+                    taskteam.update(team=team_already_exist)
+
+                    task_user = TaskUser.objects.filter(user=user, task=task)
+                    task_user.delete()
+
+                    Comment.objects.create(
+                        comment='Rechacé la tarea ' + task.title + ' debido a: ' + json_data['reason'],
+                        father_comment=None,
+                        task=task,
+                        user=user)
+
+                    TaskLog.objects.create(
+                        task=task,
+                        user=None,
+                        log_type='Reject',
+                        log_detail='Reject task ' + task.title + ' user ' + user.short_name + ' reason ' + json_data['reason'])
+
+                    response = {'response': 'Tarea rechazada correctamente.',
+                                'status': '200'
+                    }
+                    return Response(response)
+
+                except Team.DoesNotExist:
+                    print('no existe el equipo')
+                    current_taskteam = TaskTeam.objects.get(task=task, role='M')
+
+                    taskteam = TaskTeam.objects.filter(task=task, role='M')
+
+                    new_team = Team.objects.create(
+                        organization=user.organization,
+                        hash_team=hashId.hexdigest())
+
+                    taskteam.update(team=new_team)
+
+                    for current_member in remaining_team_users:
+                        member_user = User.objects.get(pk=current_member.user.pk)
+                        new_teamuser = TeamUser.objects.create(
+                            team=new_team,
+                            user=member_user)
+
+                    task_user = TaskUser.objects.filter(user=user, task=task)
+                    task_user.delete()
+
+                    Comment.objects.create(
+                        comment='Rechacé la tarea ' + task.title + ' debido a: ' + json_data['reason'],
+                        father_comment=None,
+                        task=task,
+                        user=user)
+
+                    TaskLog.objects.create(
+                        task=task,
+                        user=None,
+                        log_type='Reject',
+                        log_detail='Reject task ' + task.title + ' user ' + user.short_name + ' reason ' + json_data['reason'])
+
+                    response = {'response': 'Tarea rechazada correctamente.',
+                                'status': '200'
+                    }
+                    return Response(response)
+
+            if role.role == 'A':
+
+                remaining_team_users = TeamUser.objects.filter(
+                    team=teamuser.team).exclude(user=user).order_by('pk')
+
+                print(remaining_team_users)
+
+                hash_array = []
+                hash_array.append(user.organization.pk)
+
+                for users in remaining_team_users:
+                    print(users.user.pk)
+                    hash_array.append(users.user.pk)
+
+                hashId = hashlib.sha512()
+                hashId.update(repr(list(hash_array)).encode('utf-8'))
+
+                print(repr(list(hash_array)))
+                print(hashId.hexdigest())
+
+                try:
+                    team_already_exist = Team.objects.get(hash_team=hashId.hexdigest())
+                    print('ya existe el equipo')
+                    taskteam = TaskTeam.objects.filter(task=task, role='A')
+                    taskteam.update(team=team_already_exist)
+
+                    task_user = TaskUser.objects.filter(user=user, task=task)
+                    task_user.delete()
+
+                    Comment.objects.create(
+                        comment='Rechacé la tarea ' + task.title + ' debido a: ' + json_data['reason'],
+                        father_comment=None,
+                        task=task,
+                        user=user)
+
+                    TaskLog.objects.create(
+                        task=task,
+                        user=None,
+                        log_type='Reject',
+                        log_detail='Reject task ' + task.title + ' user ' + user.short_name + ' reason ' + json_data['reason'])
+
+                    response = {'response': 'Tarea rechazada correctamente.',
+                                'status': '200'
+                    }
+                    return Response(response)
+
+                except Team.DoesNotExist:
+                    print('no existe el equipo')
+                    current_taskteam = TaskTeam.objects.get(task=task, role='A')
+
+                    taskteam = TaskTeam.objects.filter(task=task, role='A')
+
+                    new_team = Team.objects.create(
+                        organization=user.organization,
+                        hash_team=hashId.hexdigest())
+
+                    taskteam.update(team=new_team)
+
+                    for current_member in remaining_team_users:
+                        member_user = User.objects.get(pk=current_member.user.pk)
+                        new_teamuser = TeamUser.objects.create(
+                            team=new_team,
+                            user=member_user)
+
+                    task_user = TaskUser.objects.filter(user=user, task=task)
+                    task_user.delete()
+
+                    Comment.objects.create(
+                        comment='Rechacé la tarea ' + task.title + ' debido a: ' + json_data['reason'],
+                        father_comment=None,
+                        task=task,
+                        user=user)
+
+                    TaskLog.objects.create(
+                        task=task,
+                        user=None,
+                        log_type='Reject',
+                        log_detail='Reject task ' + task.title + ' user ' + user.short_name + ' reason ' + json_data['reason'])
+
+                    response = {'response': 'Tarea rechazada correctamente.',
+                                'status': '200'
+                    }
+                    return Response(response)
+
+        except TeamUser.DoesNotExist:
+            pass
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def add_todo(request, format=None):
+    """
+    Creación de una Nueva ToDo.
+    """
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+    json_data = request.data
+
+    print(json_data)
+
+    task_pk = json_data['task_pk']
+
+    try:
+        task = Task.objects.get(pk=task_pk)
+    except Task.DoesNotExist:
+        response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                    'status': '500'
+        }
+        return Response(response)
+
+    del json_data['task_pk']
+    json_data['user'] = user.pk
+    json_data['task'] = task.pk
+
+    print(json_data)
+
+    serializer = AddToDoSerializer(data=json_data)
+    print(serializer)
+    if serializer.is_valid():
+        print('es valido (todo)')
+        serializer.save()
+        Comment.objects.create(
+            comment='Añadí el ToDo ' + json_data['todo'],
+            father_comment=None,
+            task=task,
+            user=user)
+
+        TaskLog.objects.create(
+            task=task,
+            user=user,
+            log_type='Add',
+            log_detail='New ToDo ' + task.title + ' todo ' + json_data['todo'] + ' user ' + user.short_name)
+        response = {'response': 'ToDo agregado correctamente.',
+                    'status': '200'
+        }
+        return Response(response)
+    print('no es valido')
+    error = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                'status': '500'
+    }
+    return Response(error)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def finish_todo(request, format=None):
+    """
+    Termino de una ToDo.
+    """
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    json_data = request.data
+
+    print(json_data)
+
+    todo_pk = json_data['todo']
+
+    try:
+        todo = ToDo.objects.get(pk=todo_pk)
+    except ToDo.DoesNotExist:
+        response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                    'status': '500'
+        }
+        return Response(response)
+
+    data = {
+    "done": json_data['done']
+    }
+
+    serializer = ToDoSerializer(todo, data=data, partial=True)
+    print(serializer)
+    if serializer.is_valid():
+        print('es valido el serializer (TODO)')
+        serializer.save()
+        if json_data['done'] is False:
+            Comment.objects.create(
+                comment='Marqué el ToDo ' + todo.todo + ' como no finalizado',
+                father_comment=None,
+                task=todo.task,
+                user=user)
+
+            TaskLog.objects.create(
+                task=todo.task,
+                user=user,
+                log_type='Edit',
+                log_detail='Unfinished ToDo ' + todo.todo + ' user ' + user.short_name)
+            response = {'response': 'ToDo no finalizado.',
+                        'status': '200'
+            }
+            return Response(response)
+        if json_data['done'] is True:
+            Comment.objects.create(
+                comment='Marqué el ToDo ' + todo.todo + ' como finalizado',
+                father_comment=None,
+                task=todo.task,
+                user=user)
+
+            TaskLog.objects.create(
+                task=todo.task,
+                user=user,
+                log_type='Edit',
+                log_detail='Finished ToDo ' + todo.todo + ' user ' + user.short_name)
+            response = {'response': 'ToDo finalizado.',
+                        'status': '200'
+            }
+            return Response(response)
+    print('no es valido')
+    error = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                'status': '500'
+    }
+    return Response(error)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def edit_todo(request, format=None):
+    """
+    Edición de una ToDo Existente.
+    """
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    json_data = request.data
+
+    print(json_data)
+
+    todo_pk = json_data['todo_pk']
+
+    try:
+        todo = ToDo.objects.get(pk=todo_pk)
+    except ToDo.DoesNotExist:
+        response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                    'status': '500'
+        }
+        return Response(response)
+
+    data = {
+    "todo": json_data['todo']
+    }
+
+    serializer = AddToDoSerializer(todo, data=data, partial=True)
+    print(serializer)
+    if serializer.is_valid():
+        print('es valido el serializer (TODO)')
+        serializer.save()
+        Comment.objects.create(
+            comment='Edité el ToDo ' + todo.todo,
+            father_comment=None,
+            task=todo.task,
+            user=user)
+
+        TaskLog.objects.create(
+            task=todo.task,
+            user=user,
+            log_type='Edit',
+            log_detail='Edit ToDo ' + todo.todo + ' user ' + user.short_name)
+        response = {'response': 'ToDo editado correctamente.',
+                    'status': '200'
+        }
+        return Response(response)
+    print('no es valido')
+    error = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                'status': '500'
+    }
+    return Response(error)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def delete_todo(request, format=None):
+    """
+    Inhabilitación de una ToDo Existente.
+    """
+
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    json_data = request.data
+
+    print(json_data)
+
+    todo_pk = json_data['todo']
+
+    try:
+        todo = ToDo.objects.get(pk=todo_pk)
+    except ToDo.DoesNotExist:
+        response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                    'status': '500'
+        }
+        return Response(response)
+
+    data = {
+    "active": False
+    }
+
+    serializer = ToDoSerializer(todo, data=data, partial=True)
+    print(serializer)
+    if serializer.is_valid():
+        print('es valido el serializer (TODO)')
+        serializer.save()
+        Comment.objects.create(
+            comment='Eliminé el ToDo ' + todo.todo,
+            father_comment=None,
+            task=todo.task,
+            user=user)
+
+        TaskLog.objects.create(
+            task=todo.task,
+            user=user,
+            log_type='Delete',
+            log_detail='Delete ToDo ' + todo.todo + ' user ' + user.short_name)
+        response = {'response': 'ToDo eliminado correctamente.',
+                    'status': '200'
+        }
+        return Response(response)
+    print('no es valido')
+    error = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                'status': '500'
+    }
+    return Response(error)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def add_category(request, format=None):
+    """
+    Creación de una Nueva Categoría.
+    """
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    json_data = request.data
+    json_data['organization'] = user.organization.pk
+
+    serializer = AddCategorySerializer(data=json_data)
+    print(serializer)
+    if serializer.is_valid():
+        print('es valido')
+        serializer.save()
+        response = {'response': 'Categoría agregada correctamente.',
+                    'status': '200'
+        }
+        return Response(response)
+    error = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                'status': '500'
+    }
+    return Response(error)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def edit_category(request, format=None):
+    """
+    Edición de una Categoría Existente.
+    """
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    # try:
+    #     categories = Category.objects.get(pk=pk_category)
+    # except Category.DoesNotExist:
+    #     return Response(status=status.HTTP_404_NOT_FOUND)
+    #
+    # if request.method == 'GET':
+    #
+    #     serializer = CategorySerializer(categories, many=False)
+    #     return Response(serializer.data)
+    #
+    # if request.method == 'PATCH':
+    #
+    #     data = JSONParser().parse(request)
+    #     serializer = CategorySerializer(categories, data=data, partial=True)
+    #     print(serializer)
+    #     if serializer.is_valid():
+    #         print('es valido el serializer')
+    #         serializer.save()
+    #         return Response(serializer.data, status=201)
+    #     return Response(serializer.errors, status=400)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def delete_category(request, format=None):
+    """
+    Inhabilitación de una Categoría Existente.
+    """
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    # try:
+    #     category = Category.objects.get(pk=pk_category)
+    # except Category.DoesNotExist:
+    #     return Response(status=status.HTTP_404_NOT_FOUND)
+    #
+    # data = {
+    # "active": False
+    # }
+    # serializer = CategorySerializer(category, data=data, partial=True)
+    # print(serializer)
+    # if serializer.is_valid():
+    #     print('es valido el serializer')
+    #     serializer.save()
+    #     return Response(serializer.data, status=201)
+    # return Response(serializer.errors, status=400)
+
+@login_required
+@api_view(['GET', 'POST'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def add_comment(request, format=None):
+    """
+    Creación de un Nuevo Comentario.
+    """
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    json_data = request.data
+
+    print(json_data)
+
+    if 'task_pk' in json_data:
+
+        task_pk = json_data['task_pk']
+
+        try:
+            task = Task.objects.get(pk=task_pk)
+        except Task.DoesNotExist:
+            response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                        'status': '500'
+            }
+            return Response(response)
+
+        del json_data['task_pk']
+        json_data['user'] = user.pk
+        json_data['father_comment'] = None
+        json_data['task'] = task.pk
+        json_data['active'] = True
+
+        print(json_data)
+
+        serializer = AddCommentSerializer(data=json_data)
+        print(serializer)
+        if serializer.is_valid():
+            print('es valido (comment)')
+            serializer.save()
+            response = {'response': 'Comentario agregado correctamente.',
+                        'status': '200'
+            }
+            return Response(response)
+        print('no es valido')
+        error = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                    'status': '500'
+        }
+        return Response(error)
+
+    if 'comment_pk' in json_data:
+
+        comment_pk = json_data['comment_pk']
+
+        try:
+            comment = Comment.objects.get(pk=comment_pk)
+        except Comment.DoesNotExist:
+            response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                        'status': '500'
+            }
+            return Response(response)
+
+        try:
+            task = Comment.objects.get(pk=comment_pk).task.pk
+        except Comment.DoesNotExist:
+            response = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                        'status': '500'
+            }
+            return Response(response)
+
+        del json_data['comment_pk']
+        json_data['comment'] = json_data['reply']
+        del json_data['reply']
+        json_data['user'] = user.pk
+        json_data['father_comment'] = comment_pk
+        json_data['task'] = task
+        json_data['active'] = True
+
+        print(json_data)
+
+        serializer = AddCommentSerializer(data=json_data)
+        print(serializer)
+        if serializer.is_valid():
+            print('es valido (comment)')
+            serializer.save()
+            response = {'response': 'Respuesta agregada correctamente.',
+                        'status': '200'
+            }
+            return Response(response)
+        print('no es valido')
+        error = {'response': 'Ocurrió un error. Intenta de nuevo.',
+                    'status': '500'
+        }
+        return Response(error)
+
+@login_required
+@api_view(['GET', 'PATCH'])
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def edit_comment(request, pk_comment, format=None):
+    """
+    Edición de una Categoría Existente.
+    """
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    try:
+        comment = Comment.objects.get(pk=pk_comment)
+    except Comment.DoesNotExist:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+
+        serializer = AddCommentSerializer(comment, many=False)
+        return Response(serializer.data)
+
+    if request.method == 'PATCH':
+
+        data = JSONParser().parse(request)
+        serializer = AddCommentSerializer(comment, data=data, partial=True)
+        print(serializer)
+        if serializer.is_valid():
+            print('es valido el serializer')
+            serializer.save()
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+
+@login_required
+@api_view()
+@authentication_classes((SessionAuthentication, BasicAuthentication))
+@permission_classes((IsAuthenticated,))
+def delete_comment(request, pk_comment, format=None):
+    """
+    Inhabilitación de una Comentario Existente.
+    """
+    c_user = request.user
+    user = User.objects.get(user=c_user)
+
+    try:
+        comment = Comment.objects.get(pk=pk_comment)
+    except Comment.DoesNotExist:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    data = {
+    "active": False
+    }
+    serializer = AddCommentSerializer(comment, data=data, partial=True)
+    print(serializer)
+    if serializer.is_valid():
+        print('es valido el serializer')
+        serializer.save()
+        return Response(serializer.data, status=201)
+    return Response(serializer.errors, status=400)
