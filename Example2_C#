@@ -1,0 +1,238 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Web;
+using System.Web.UI;
+using System.Web.UI.WebControls;
+using Condominios.BAL;
+using Condominios.Class;
+using System.Web.Services;
+using System.Web.Script.Services;
+
+namespace Condominios.Web.CleanZone
+{
+    public partial class CajaChica : System.Web.UI.Page
+    {
+        protected void Page_Load(object sender, EventArgs e)
+        {     
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static cCajaChica obtenerCaja(int row)
+        {
+            try
+            {
+                balCajaChica bal = new balCajaChica();
+
+                return bal.obtenerPorId(row);
+            }
+            catch (Exception ex)
+            {
+
+                throw ex;
+            }
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static List<cCajaChica> consultarCajas()
+        {
+            try
+            {
+
+                var _condominio = (cCondominio)HttpContext.Current.Session["condominio"];
+                balCajaChica bal = new balCajaChica();
+                return bal.consultarCajasChica(_condominio.IdCondominio);
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static cCajaChica guardarCaja(int row, string nombre, decimal saldoInicial, decimal saldoActual, string fechaAlta,
+            string fechaDeSaldo, int activo, string fechaCierre)
+        {
+            try
+            {
+                if (HttpContext.Current.Session["condominio"] == null)
+                    return null;
+                var _condominio = (cCondominio)HttpContext.Current.Session["condominio"];
+                balCajaChica bal = new balCajaChica();
+                cCajaChica _caja = new cCajaChica
+                   {
+                       IdCaja = row,
+                       IdCondominio = _condominio.IdCondominio,
+                       Nombre = nombre,
+                       SaldoInicial = saldoInicial,
+                       SaldoActual = saldoActual,
+                       FechaAlta = DateTime.Parse(fechaAlta),
+                       FechaSaldo = DateTime.Parse(fechaDeSaldo),
+                       IdCuentaPorPagar = 1,
+                       Activo = activo,
+                       FechaCierre = DateTime.Parse(fechaCierre),
+                   };
+
+                if (row > 0)
+                {
+                    bal.actualizarCaja(_caja);
+                }
+                else
+                {
+                    var _resultado = bal.insertarCaja(_caja);
+
+                    _caja.IdCaja = _resultado.IdCaja;
+                }
+
+                return _caja;
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static bool actualizarEstatus(int row)
+        {
+            try
+            {
+                balCajaChica bal = new balCajaChica();
+                return bal.actualizarEstatus(row);
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static decimal actualizarSaldoActual(int row)
+        {
+            try
+            {
+                balCajaChica bal = new balCajaChica();
+                return bal.actualizarSaldoActual(row);
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static bool borrarCajaChica(int row)
+        {
+            try
+            {
+                balCajaChica bal = new balCajaChica();
+                return bal.borrarCajaChica(row);
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static cCajaChicaDetalle guardarGasto(int idDetalle, int row, string descripcion, decimal monto, string fecha, int pagado)
+        {
+            try
+            {
+                balCajaChicaDetalle bal = new balCajaChicaDetalle();
+                cCajaChicaDetalle _gasto = new cCajaChicaDetalle
+                {
+                    IdGasto= idDetalle,
+                    IdCaja = row,
+                    Monto = monto,
+                    Fecha = DateTime.Parse(fecha),
+                    Descripcion = descripcion,
+                    IdTipoGasto = 1,
+                    Pagado = pagado,
+                };
+
+                if (idDetalle > 0)
+                {
+                    bal.actualizarDetalle(_gasto);
+                }
+                else
+                {
+                    var _resultado = bal.insertarDetalle(_gasto);
+                    _gasto.IdGasto = _resultado.IdGasto;
+                }
+                return _gasto;
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static List<Condominios.DAL.DetalleCajaChica> consultarGastos(int idCaja)
+        {
+            try
+            {                
+                balCajaChicaDetalle bal = new balCajaChicaDetalle();
+                return bal.consultarDetalle(idCaja);
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static cCajaChicaDetalle obtenerGasto(int row)
+        {
+            try
+            {
+                balCajaChicaDetalle bal = new balCajaChicaDetalle();
+                return bal.obtenerPorId(row);
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static bool borrarGasto(int row)
+        {
+            try
+            {
+                balCajaChicaDetalle bal = new balCajaChicaDetalle();
+                return bal.borrarDetalle(row);
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+        }
+
+        [WebMethod]
+        [ScriptMethod]
+        public static bool actualizarEstatusPagado(int row)
+        {
+            try
+            {
+                balCajaChicaDetalle bal = new balCajaChicaDetalle();
+                return bal.actualizarEstatusPagado(row);
+            }
+            catch (Exception ex)
+            {
+                throw ex;
+            }
+        }
+    }
+}
