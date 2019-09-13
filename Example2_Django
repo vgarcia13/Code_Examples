@@ -1,0 +1,694 @@
+import logging
+
+from django.conf import settings
+
+from django.contrib import messages
+from django.contrib.auth.decorators import login_required
+from django.contrib.messages.views import SuccessMessageMixin
+from django.core import serializers
+from django.core.mail import EmailMultiAlternatives
+from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
+from django.core.urlresolvers import reverse
+from django.core.urlresolvers import reverse_lazy
+from django.http import Http404, JsonResponse
+from django.shortcuts import render, get_object_or_404, redirect
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_control
+from django.views.generic import View, CreateView, UpdateView
+
+from evaluations.models import Evaluation, TextTranslation
+from projects.forms.ClientForms import NewClientForm, EditClientForm
+from projects.models import Client, Employee, EvaluationType, Project
+
+__author__ = 'vgarcia'
+
+logger = logging.getLogger('ganesha')
+
+
+class Clients(View):
+    """
+    view: Muestra los clientes contenidos en la plataforma
+    """
+    @method_decorator(login_required)
+    @cache_control(no_cache=True, most_revalidate=True, no_store=True)
+    def dispatch(self, request, *args, **kwargs):
+        """
+        LLama al constructor de la clase Clients
+
+        :param request: Solicitud
+        :param args: Parametros extras
+        :param kwargs: Parametros extras
+        :return: Construtor de la clase Clients
+        """
+        return super(Clients, self).dispatch(request, *args, **kwargs)
+
+    def get(self, request):
+        """
+        Obtiene el listado de los clientes en una paginación
+
+        :param request: Solicitud para la muestra
+        :return: template con los clientes
+        """
+
+        search_text = request.GET.get('searchInput')
+        if search_text:
+            all_clients = Client.objects.filter(name__icontains=search_text, processed=True).order_by('name')
+            if not all_clients:
+                all_clients = Client.objects.filter(processed=True).order_by('name')
+                messages.add_message(self.request, messages.ERROR, 'No se encontraron resultados.')
+        else:
+            all_clients = Client.objects.filter(processed=True).order_by('name')
+
+        incomplete_wizard_client = Client.objects.filter(processed=False)
+        incomplete_wizard_project = Project.objects.filter(processed=False)
+
+        empowerment_category_rename = TextTranslation.objects.get(string_key="category_28")
+        empowerment_category_rename.spanish = "Empowerment"
+        empowerment_category_rename.save()
+
+        context = {
+            'username': request.user.first_name + ' ' + request.user.last_name,
+            'navbar': 'clients',
+            'clients': all_clients,  # current_clients,
+            'searchInput': search_text,
+            'incomplete_wizard_client': incomplete_wizard_client,
+            'incomplete_wizard_project': incomplete_wizard_project,
+            'MEDIA_URL': settings.MEDIA_URL
+        }
+        return render(request, 'projects/ClientTemplates/clients.html', context)
+
+    def post(self, request):
+        """
+        Petición para eliminar un cliente
+        :param request: Solicitud
+        :return: redirige a la url de clientes
+        """
+        if 'eliminar_cliente' in request.POST:
+            try:
+                client = Client.objects.get(pk=request.POST['eliminar_cliente'])
+                client.delete()
+            except Client.DoesNotExist:
+                pass
+        else:
+            pass
+        url = reverse_lazy('projects:clients')
+        return redirect(url)
+
+
+class Client_Detail(View):
+    """
+    view: Maneja la vista de detalle de un cliente
+    """
+    @cache_control(no_cache=True, most_revalidate=True, no_store=True)
+    @method_decorator(login_required)
+    def dispatch(self, request, *args, **kwargs):
+        """
+        Llama al constructor de la clase Client_Detail
+
+        :param request: Solicitud
+        :param args: Parametros extra
+        :param kwargs: Parametros extra
+        :return: Constructor de la clase Client_Detail
+        """
+
+        return super(Client_Detail, self).dispatch(request, *args, **kwargs)
+
+    def get(self, request, client_id):
+        """
+        Obtiene los detalles del cliente
+
+        :param request: Solicitud
+        :param client_id: Id de cliente
+        :return: template con los detalles del cliente
+        """
+        try:
+            project_to_delete_pk = request.GET['eliminar_proyecto']
+            x = Project.objects.get(pk=project_to_delete_pk)
+            x.delete()
+        except:
+            pass
+
+        return self._render_client_detail(client_id, request)
+
+    def _render_client_detail(self, client_id, request):
+        """
+        Muestra los detalles del cliente en un template
+
+        :param client_id: Id del cliente
+        :param request: Soicitud
+        :return: template con los detalles del cliente
+        """
+        from datetime import datetime
+
+        present = datetime.today().date()
+
+        client = get_object_or_404(Client, pk=client_id)
+        logo = client.logo
+
+        search_text = request.GET.get('searchInput')
+        if search_text:
+            all_projects = client.project_set.filter(name__icontains=search_text, processed=True).order_by('name')
+            if not all_projects:
+                all_projects = client.project_set.filter(processed=True)
+                messages.add_message(self.request, messages.ERROR, 'No se encontraron resultados.')
+        else:
+            all_projects = client.project_set.filter(processed=True)
+        current_projects = []
+        if all_projects:
+            # Updates project state
+            for project in all_projects:
+                if project.active:
+                    end_date = project.end_date
+                    today = datetime.now().date()
+                    if today > end_date:
+                        project.active = False
+                        self.evaluations_availables(project)
+                        project.save()
+                else:
+                    end_date = project.end_date
+                    today = datetime.now().date()
+                    if today <= end_date:
+                        project.active = True
+
+                        project.save()
+
+            paginator = Paginator(all_projects, 5)
+            page = request.GET.get('page')
+            try:
+                current_projects = paginator.page(page)
+            except PageNotAnInteger as e:
+                current_projects = paginator.page(1)
+            except EmptyPage:
+                current_projects = paginator.page(paginator.num_pages)
+
+        try:
+            incomplete_wizard_client = Client.objects.filter(processed=False)
+            incomplete_wizard_project = Project.objects.filter(processed=False)
+        except:
+            incomplete_wizard_client = 0
+            incomplete_wizard_project = 0
+
+        active_projects = []
+        inactive_projects = []
+
+        for project in all_projects:
+            if project.active:
+                active_projects.append(project)
+            else:
+                inactive_projects.append(project)
+
+        context = {
+            'username': request.user.get_full_name(),
+            'navbar': 'clients',
+            'client': client,
+            'evaluation_types': EvaluationType.objects.filter(evaluation_type__lt=3),
+            'projects_active': active_projects,
+            'projects_inactive': inactive_projects,
+            'searchInput': search_text,
+            'incomplete_wizard_client': incomplete_wizard_client,
+            'incomplete_wizard_project': incomplete_wizard_project
+        }
+        return render(request, 'projects/ClientTemplates/client_detail.html', context)
+
+    def evaluations_availables(self, project):
+        """
+        Función auxiliar que obtiene evaluaciones completas y pendientes cuando un proyecto esta inactivo
+        :param project: proyecto
+        """
+        evaluations_unprocessed = Evaluation.objects.filter(project=project).filter(state_id=1)
+        logger.info('Obteniendo evaluaciones pendientes: {}'.format(evaluations_unprocessed))
+        evaluations_processed = Evaluation.objects.filter(project=project).filter(state_id=2)
+        logger.info('Obteniendo evaluaciones completas: {}'.format(evaluations_processed))
+
+        flag = False
+        evaluation_to_send = None
+        for eval_to_check in evaluations_processed:
+            if eval_to_check.notified is False:
+                flag = True
+                evaluation_to_send = eval_to_check
+                break
+        for eval_to_check in evaluations_unprocessed:
+            if eval_to_check.notified is False:
+                flag = True
+                evaluation_to_send = eval_to_check
+                break
+        if flag:
+            self.send_email(evaluation_to_send, evaluations_processed, evaluations_unprocessed)
+
+        notified = []
+        for evalu in evaluations_processed:
+            notified.append(evalu.notified)
+            evalu.notified = True
+            evalu.save()
+
+    def send_email(self, evaluation_to_send, evaluations_processed, evaluations_unprocessed):
+        """
+        Envio de notificación de evaluaciones procesadas y no procesadas
+        :param evaluation_to_send: evaluación a enviar
+        :param evaluations_processed: evaluaciones procesadas
+        :param evaluations_unprocessed: evaluaciones no procesadas
+        """
+        logger.info('Ingresando a envio de notificaciones por email por proyecto inactivo')
+        project = str(evaluation_to_send.project.name)
+        evaluation_type = evaluation_to_send.project.evaluation_type
+        client = str(evaluation_to_send.project.client.name)
+
+        evaluation_processed_list = []
+        evaluation_unprocessed_list = []
+
+        for evaluation_processed in evaluations_processed:
+            evaluation_processed_list.append(str(evaluation_processed))
+        body_processed = []
+        for evaluation in evaluation_processed_list:
+            body_processed.append("<li>{}</li>".format(str(evaluation)))
+
+        body_processed = str(body_processed).replace("['", " ").replace("']", " ").replace("'", " ").replace(",", " ")
+
+        if not evaluation_processed_list:
+            body_processed = 'No se encontraron evaluaciones'
+
+        for evaluation_unprocessed in evaluations_unprocessed:
+            evaluation_unprocessed_list.append(str(evaluation_unprocessed))
+        body_unprocessed = []
+        for evaluation in evaluation_unprocessed_list:
+            body_unprocessed.append("<li>{}</li>".format(str(evaluation)))
+
+        body_unprocessed = str(body_unprocessed).replace("['", " ").replace("']", " ").replace("'", " ").replace(",",
+                                                                                                                 " ")
+
+        if not evaluation_unprocessed_list:
+            body_unprocessed = 'No se encontraron evaluaciones'
+
+        from_email = 'assessments@humandevelopmentsolutions.com'
+        to_email = from_email
+        subject_text = '¡Un proyecto ha concluido!'
+        message_text = 'El proyecto: ' + str(project) + ' (' + str(evaluation_type) + ') de ' + client + \
+                       ' ha expirado. <br><br><strong> Las siguientes evaluaciones fueron completadas:</strong> ' + str(
+            body_processed) + \
+                       '<br><br><strong>Las siguientes evaluaciones no se completaron</strong>: ' + str(
+            body_unprocessed) + \
+                       '<br><br>''Por favor ingrese a la plataforma para descargar los reportes.<br><br> Gracias'
+        message_text = message_text.format(evaluation_processed_list, evaluation_unprocessed_list)
+        if subject_text and message_text and to_email:
+            msg = EmailMultiAlternatives(subject_text, message_text, from_email, [to_email])
+            msg.attach_alternative(message_text, "text/html")
+            msg.send()
+
+    def post(self, request, client_id):
+        """
+        Muestra sin recargar la pagina los detalles de cliente
+
+        :param request: Solicitud
+        :param client_id: id del cliente
+        :return: Redirección a la pagina de detalles
+        """
+        eval_pk = int(request.POST['tipo_eval'])
+        evaluation_type = get_object_or_404(EvaluationType, pk=eval_pk)
+
+        try:
+            redirect_to = self._getRedirectFromType(evaluation_type)
+        except:
+            messages.add_message(request, messages.ERROR, 'Este tipo de proyecto aún no está implementado')
+            return self._render_client_detail(client_id, request)
+        return redirect(reverse(redirect_to, args=[str(client_id)]))
+
+    def _getRedirectFromType(self, evaluation_type):
+        """
+        Obtiene la redirección de acuerdo al tipo de evaluación
+
+        :param evaluation_type: Tipo de evalución
+        :return: view al nuevo proyecto o excepción
+        """
+        if evaluation_type.evaluation_type == EvaluationType.E_360:
+            return 'projects:new_360_project'
+        elif evaluation_type.evaluation_type == EvaluationType.E_EQSIGHT:
+            return 'projects:new_EQSight_project'
+        elif evaluation_type.evaluation_type == EvaluationType.E_PCD:
+            return 'projects:new_PCD_project'
+        else:
+            raise NotImplementedError
+
+
+class New_Client(SuccessMessageMixin, CreateView):
+    """
+    view: Muestra el formulario para la creación de un nuevo cliente
+    """
+    model = Client
+    form_class = NewClientForm
+
+    template_name = 'projects/ClientTemplates/new_client.html'
+    EMPLOYEES_SESSION_KEY = 'new_client_employees'
+    ERRORS_SESSION_KEY = 'new_client_errors'
+
+    @method_decorator(login_required)
+    @cache_control(no_cache=True, most_revalidate=True, no_store=True)
+    def dispatch(self, request, *args, **kwargs):
+        """
+        Llama al constructor de la clase New_Client
+
+        :param request: Solicitud
+        :param args: Parametros extras
+        :param kwargs: Parametros extras
+        :return: Constructor de New_Client
+        """
+        return super(New_Client, self).dispatch(request, *args, **kwargs)
+
+    def form_valid(self, form):
+        """
+        Valida los datos ingresados en los campos del formulario NewClientForm
+
+        :param form: Formulario
+        :return: Constructor de la clase New_Client
+        """
+        excelData = form.getExcelData()
+        employees = list(excelData['readEmployees'])
+        self.request.session[self.EMPLOYEES_SESSION_KEY] = serializers.serialize("json", employees)
+        self.request.session[self.ERRORS_SESSION_KEY] = excelData['errors']
+        return super(New_Client, self).form_valid(form)
+
+    def post(self, request, *args, **kwargs):
+        if 'Cancelar' in self.request.POST:
+            url = reverse_lazy('projects:clients')
+            return redirect(url)
+        else:
+            return super(New_Client, self).post(request, *args, **kwargs)
+
+    def render_to_response(self, context, **response_kwargs):
+        """
+        responde la solicitud de validación
+
+        :param context: Contexto de validación
+        :param response_kwargs: Parametros extra
+        :return: Respuesta de solicitud
+        """
+        try:
+            incomplete_wizard_client = Client.objects.filter(processed=False)
+            incomplete_wizard_project = Project.objects.filter(processed=False)
+        except:
+            incomplete_wizard_client = 0
+            incomplete_wizard_project = 0
+
+        context['username'] = self.request.user.get_full_name()
+        context['navbar'] = 'clients'
+        context['incomplete_wizard_client'] = incomplete_wizard_client
+        context['incomplete_wizard_project'] = incomplete_wizard_project
+        response_kwargs.setdefault('content_type', self.content_type)
+
+        return self.response_class(
+            request=self.request,
+            template=self.get_template_names(),
+            context=context,
+            using=self.template_engine,
+            **response_kwargs
+        )
+
+
+class Confirm_Client(View):
+    """
+    view: Confirma la creación de un cliente
+    """
+    @method_decorator(login_required)
+    @cache_control(no_cache=True, most_revalidate=True, no_store=True)
+    def dispatch(self, request, *args, **kwargs):
+        """
+        Llama al constructor de la clase Confirm_Client
+
+        :param request: Solicitud
+        :param args: Parametros extras
+        :param kwargs:  Parametros extras
+        :return: Constructor de la clase Confirm_Client
+        """
+        return super(Confirm_Client, self).dispatch(request, *args, **kwargs)
+
+    def get(self, request, client_id):
+        """
+        Obtiene la vista de detalle una vez que el client fue creado
+
+        :param request: solicitud
+        :param client_id: id del cliente
+        :return: template con los detalles del cliente
+        """
+        new_client = get_object_or_404(Client, pk=client_id)
+        if new_client.processed:
+            return redirect(reverse('projects:client_detail', args=[str(new_client.pk)]))
+        try:
+            employees_serialized = self.request.session[New_Client.EMPLOYEES_SESSION_KEY]
+            employees = []
+            for obj in serializers.deserialize('json', employees_serialized):
+                employees.append(obj.object)
+
+            try:
+                incomplete_wizard_client = Client.objects.filter(processed=False)
+                incomplete_wizard_project = Project.objects.filter(processed=False)
+            except:
+                incomplete_wizard_client = 0
+                incomplete_wizard_project = 0
+
+            errors = self.request.session[New_Client.ERRORS_SESSION_KEY]
+            context = {
+                'username': request.user.get_full_name(),
+                'navbar': 'clients',
+                'new_client': new_client,
+                'employees': employees,
+                'errors': errors,
+                'incomplete_wizard_client': incomplete_wizard_client,
+                'incomplete_wizard_project': incomplete_wizard_project
+            }
+            return render(request, 'projects/ClientTemplates/confirm_client.html', context)
+        except:
+            raise Http404
+
+    def post(self, request, client_id):
+        """
+        Sin recargar la página obtiene un mensaje de exito al crear el cliente
+
+        :param request: Solicitud
+        :param client_id: Id del cliente
+        :return: Json con el mensaje correspondiete 'completo' o 'error'
+        """
+        if request.is_ajax():
+            if request.POST['code'] == 'confirm':
+                try:
+                    self._processClient(client_id)
+                    self._clearSessionData()
+                    data = {
+                        'urlToRedirect': reverse('projects:client_detail', args=[str(client_id)])
+                    }
+                    messages.add_message(request, messages.SUCCESS, 'Cliente creado exitosamente')
+                    return JsonResponse(data, status=200)
+                except Exception as e:
+                    data = {
+                        'error': e
+                    }
+                    return JsonResponse(data, status=500)
+            elif request.POST['code'] == 'return':
+                try:
+                    self._deleteClient(client_id)
+                    self._clearSessionData()
+                    data = {
+                        'urlToRedirect': reverse('projects:new_client')
+                    }
+                    return JsonResponse(data, status=200)
+                except Exception as e:
+                    data = {
+                        'error': e
+                    }
+                    return JsonResponse(data, status=500)
+            else:
+                data = {
+                    'error': "Error en la llamada de ajax, parametros inválidos en post a Confirm_Client"
+                }
+                return JsonResponse(data, status=500)
+        else:
+            return redirect(reverse('projects:client_detail', args=[str(client_id)]))
+
+    def _processClient(self, client_id):
+        """
+        Crea el cliente con los datos llenados en el formulario
+
+        :param client_id: Id del cliente
+        :return: 0
+        """
+        new_client = get_object_or_404(Client, pk=client_id)
+        employees_serialized = self.request.session[New_Client.EMPLOYEES_SESSION_KEY]
+        for obj in serializers.deserialize('json', employees_serialized):
+            employee = self._createEmployeeForClient(new_client, obj.object)
+            if employee:
+                employee.save()
+
+        new_client.processed = True
+        new_client.save()
+
+    def _createEmployeeForClient(self, new_client, employeeDTO):
+        """
+        Crea el empleado de acuerdo al cliente.
+
+        :param new_client: Objeto de tipo Client
+        :param employeeDTO: Instancia de la clase EmployeeDTO
+        :return: Objeto con el empleado creado o Null
+        """
+        try:
+            check_name = any(char.isdigit() for char in employeeDTO.first_name)
+            check_last_name = any(char.isdigit() for char in employeeDTO.last_name)
+            if check_name or check_last_name:
+                return None
+            else:
+                return Employee(first_name=employeeDTO.first_name, last_name=employeeDTO.last_name,
+                                email=employeeDTO.email,
+                                client=new_client, preferred_language=new_client.preferred_language)
+        except Exception as e:
+            return None
+
+    def _deleteClient(self, client_id):
+        """
+        Elimina un cliente
+
+        :param client_id: Id del cliente
+        :return: 0
+        """
+        new_client = get_object_or_404(Client, pk=client_id)
+        new_client.delete()
+
+    def _clearSessionData(self):
+        """
+        Limpia la session que fue creada para el cliente y empleados
+
+        :return: 0
+        """
+        del self.request.session[(New_Client.EMPLOYEES_SESSION_KEY)]
+        del self.request.session[(New_Client.ERRORS_SESSION_KEY)]
+
+
+class EditClient(UpdateView):
+    """
+    view: Muestra el formulario de edición a un cliente
+    """
+    model = Client
+    form_class = EditClientForm
+    template_name = 'projects/ClientTemplates/edit_client.html'
+
+    @method_decorator(login_required)
+    @cache_control(no_cache=True, most_revalidate=True, no_store=True)
+    def dispatch(self, request, *args, **kwargs):
+        """
+        Llama al constructor de la clase EditClient
+
+        :param request: Solicitud
+        :param args: Parametros Extra
+        :param kwargs: Parametros Extra
+        :return: Constrcutor de la clase EditClient
+        """
+        return super(EditClient, self).dispatch(request, *args, **kwargs)
+
+    def __init__(self):
+        """
+        Constructor de la vista EditClient
+        """
+        self.canceled = False
+        super(EditClient, self).__init__()
+
+    def render_to_response(self, context, **response_kwargs):
+        """
+        Responde la solicitud de edición de un cliente
+
+        :param context: Contexto
+        :param response_kwargs: Parametros de solictud
+        :return: Respuesta de la solicitud
+        """
+        client = get_object_or_404(Client, pk=self.kwargs['pk'])
+
+        try:
+            incomplete_wizard_client = Client.objects.filter(processed=False)
+            incomplete_wizard_project = Project.objects.filter(processed=False)
+        except:
+            incomplete_wizard_client = 0
+            incomplete_wizard_project = 0
+
+        context['username'] = self.request.user.get_full_name()
+        context['navbar'] = 'clients'
+        context['client'] = client
+        context['incomplete_wizard_client'] = incomplete_wizard_client
+        context['incomplete_wizard_project'] = incomplete_wizard_project
+        response_kwargs.setdefault('content_type', self.content_type)
+
+        return self.response_class(
+            request=self.request,
+            template=self.get_template_names(),
+            context=context,
+            using=self.template_engine,
+            **response_kwargs
+        )
+
+    def post(self, request, *args, **kwargs):
+        """
+        Petición para cancelar la edición de un cliente
+        :param request: Petición
+        :param args: Parámetros extra
+        :param kwargs: Parámetros extra
+        :return: Redirige a la pantalla de detalle de cliente
+        """
+        if 'Cancelar' in request.POST:
+            self.canceled = True
+            url = reverse_lazy("projects:client_detail", kwargs={'client_id': self.kwargs['pk']})
+            return redirect(url)
+        return super(EditClient, self).post(request, *args, **kwargs)
+
+    def get_success_url(self):
+        """
+        Obtiene la url de modificación del cliente
+
+        :return: Regresa a la vista de detalle del cliente
+        """
+        client = Client.objects.get(pk=self.kwargs['pk'])
+        if not self.canceled:
+            messages.add_message(self.request, messages.SUCCESS, 'Se modificó el cliente ' + client.__str__())
+        return reverse('projects:client_detail', args=[self.kwargs['pk']])
+
+
+class DeleteClient(View):
+    """
+    view: Elimina un cliente
+    """
+    @method_decorator(login_required)
+    @cache_control(no_cache=True, most_revalidate=True, no_store=True)
+    def dispatch(self, request, *args, **kwargs):
+        """
+        Llama al constructor de la clase DeleteClient
+
+        :param request: Solicitud
+        :param args: Parametros extra
+        :param kwargs: Parametros extra
+        :return: Constructor de la clase DeleteClient
+        """
+        return super(DeleteClient, self).dispatch(request, *args, **kwargs)
+
+    def deleteClient(self, request):
+        """
+        Elimina un cliente
+
+        :param request: Solicitud
+        :return: Mensaje de completado
+        """
+        client_id = request.POST['client_id']
+        client_to_delete = Client.objects.get(id=client_id)
+        client_to_delete.delete()
+        messages.add_message(request, messages.SUCCESS, 'Cliente eliminado satisfactoriamente')
+        data = {'success': 'Completed'}
+        return data
+
+    def post(self, request, *args, **kwargs):
+        """
+        Sin recargar la página muestra mensaje de eliminación de cliente 'completo' o 'error'
+
+        :param request: solicitud
+        :param args: Parametros extra
+        :param kwargs: Parametros extra
+        :return: Mensaje serializado
+        """
+        if request.is_ajax():
+            try:
+                return JsonResponse(self.deleteClient(request), status=200)
+
+            except Exception as e:
+                data = {'error': 'Falló al intentar borrar el cliente'}
+                return JsonResponse(data, status=500)
